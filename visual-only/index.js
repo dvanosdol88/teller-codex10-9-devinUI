@@ -38,6 +38,11 @@ const BackendAdapter = (() => {
     return h;
   }
 
+  function setBearerToken(token) {
+    state.bearerToken = token;
+    console.log('[BackendAdapter] Bearer token set');
+  }
+
   async function fetchAccounts() {
     if (!isBackendEnabled()) return MOCK_ACCOUNTS;
     try {
@@ -45,7 +50,13 @@ const BackendAdapter = (() => {
       if (!resp.ok) throw new Error("accounts failed");
       const data = await resp.json();
       return (data.accounts || []).map(a => ({
-        id: a.id, name: a.name, institution: a.institution, last_four: a.last_four, currency: a.currency
+        id: a.id,
+        name: a.name,
+        institution: a.institution,
+        last_four: a.last_four,
+        currency: a.currency,
+        type: a.type,        // "depository", "credit", etc.
+        subtype: a.subtype   // "checking", "savings", etc.
       }));
     } catch {
       return MOCK_ACCOUNTS;
@@ -85,10 +96,20 @@ const BackendAdapter = (() => {
         fetch(`${state.apiBaseUrl}/accounts/${encodeURIComponent(accountId)}/transactions?count=${count}`, { headers: headers() }),
       ]);
       if (!bResp.ok || !tResp.ok) throw new Error("live refresh failed");
-      const balance = await bResp.json();
+      const balanceData = await bResp.json();
       const txsData = await tResp.json();
-      return { balance, transactions: txsData.transactions || [] };
-    } catch {
+      
+      // Backend balance response is { account_id, balance: {...} }
+      // Extract the nested balance object
+      const balance = balanceData.balance || balanceData;
+      
+      // Backend transactions response is { account_id, transactions: [...] }
+      // Extract the transactions array
+      const transactions = txsData.transactions || [];
+      
+      return { balance, transactions };
+    } catch (err) {
+      console.error('[BackendAdapter.refreshLive] error:', err);
       return { balance: MOCK_BALANCES[accountId], transactions: (MOCK_TRANSACTIONS[accountId] || []) };
     }
   }
@@ -118,24 +139,38 @@ const BackendAdapter = (() => {
     return await resp.json();
   }
 
-  return { loadConfig, isBackendEnabled, fetchAccounts, fetchCachedBalance, fetchCachedTransactions, refreshLive, fetchManualData, saveManualData };
+  return {
+    loadConfig,
+    isBackendEnabled,
+    setBearerToken,
+    fetchAccounts,
+    fetchCachedBalance,
+    fetchCachedTransactions,
+    refreshLive,
+    fetchManualData,
+    saveManualData
+  };
 })();
 const MOCK_ACCOUNTS = [
-  { id: 'acc_checking', name: 'Checking', institution: 'Demo Bank', last_four: '1234', currency: 'USD' },
-  { id: 'acc_savings', name: 'Savings', institution: 'Demo Bank', last_four: '9876', currency: 'USD' }
+  { id: 'acc_llc_checking', name: 'LLC Checking', institution: 'Demo Bank', last_four: '1234', currency: 'USD', type: 'depository', subtype: 'checking' },
+  { id: 'acc_llc_savings', name: 'LLC Savings', institution: 'Demo Bank', last_four: '9876', currency: 'USD', type: 'depository', subtype: 'savings' }
 ];
 
 const MOCK_BALANCES = {
-  acc_checking: { available: 1250.25, ledger: 1300.25, currency: 'USD', cached_at: new Date().toISOString() },
-  acc_savings: { available: 8200.00, ledger: 8200.00, currency: 'USD', cached_at: new Date().toISOString() }
+  acc_llc_checking: { available: 3500.00, ledger: 3500.00, currency: 'USD', cached_at: new Date().toISOString() },
+  acc_llc_savings: { available: 12000.00, ledger: 12000.00, currency: 'USD', cached_at: new Date().toISOString() }
 };
 
 const MOCK_TRANSACTIONS = {
-  acc_checking: [
-    { description: 'Coffee Shop', amount: -3.75, date: '2025-10-08' },
-    { description: 'Payroll', amount: 2500.00, date: '2025-10-01' },
+  acc_llc_checking: [
+    { description: 'Rent Payment - Unit 1', amount: 1200.00, date: '2025-10-01' },
+    { description: 'Mortgage Payment', amount: -850.00, date: '2025-10-05' },
+    { description: 'HOA Fee', amount: -150.00, date: '2025-10-10' },
+    { description: 'Property Insurance', amount: -200.00, date: '2025-10-12' },
   ],
-  acc_savings: []
+  acc_llc_savings: [
+    { description: 'Emergency Fund Transfer', amount: 2000.00, date: '2025-09-15' }
+  ]
 };
 
 function showToast(message) {
