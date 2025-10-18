@@ -108,6 +108,7 @@ const BackendAdapter = (() => {
       cachedTransactions: '/db/accounts/{accountId}/transactions?limit={limit}',
       liveBalance: '/accounts/{accountId}/balances',
       liveTransactions: '/accounts/{accountId}/transactions?count={count}',
+      manualRentRoll: '/db/accounts/{accountId}/rent-roll',
     };
     const aliases = {
       accounts: ['accounts', 'accountsUrl', 'accountsList'],
@@ -115,6 +116,7 @@ const BackendAdapter = (() => {
       cachedTransactions: ['cachedTransactions', 'transactions', 'cachedTransactionsUrl', 'accountTransactions'],
       liveBalance: ['liveBalance', 'liveBalanceUrl', 'liveAccountBalance'],
       liveTransactions: ['liveTransactions', 'liveTransactionsUrl', 'liveAccountTransactions'],
+      manualRentRoll: ['manualRentRoll', 'rentRoll', 'rentRollUrl', 'manualData', 'manualDataUrl'],
     };
     const source = (inventory && (inventory.endpoints || inventory.urls)) || inventory || {};
     return Object.keys(defaults).reduce((acc, key) => {
@@ -190,6 +192,7 @@ const BackendAdapter = (() => {
     cachedTransactions: translateCachedTransactions,
     liveBalance: translateLiveBalance,
     liveTransactions: translateLiveTransactions,
+    manualRentRoll: translateManualRentRoll,
   };
 
   const translationMap = createTranslationMap(backendInventory);
@@ -237,6 +240,18 @@ const BackendAdapter = (() => {
 
   function translateLiveTransactions(payload) {
     return translateCachedTransactions(payload);
+  }
+
+  function translateManualRentRoll(payload, context = {}) {
+    const accountId = coerceId(payload?.account_id ?? payload?.accountId ?? context?.accountId);
+    const rentRollRaw = payload?.rent_roll !== undefined ? payload.rent_roll : payload?.rentRoll;
+    const rentRoll = rentRollRaw === null ? null : coerceNumber(rentRollRaw);
+    const updatedAt = coerceTimestamp(payload?.updated_at ?? payload?.updatedAt ?? payload?.timestamp ?? payload?.updated);
+    return {
+      account_id: accountId ?? context?.accountId ?? null,
+      rent_roll: rentRollRaw === null ? null : (rentRoll ?? null),
+      updated_at: updatedAt,
+    };
   }
 
   function normalizeAccount(account) {
@@ -297,28 +312,58 @@ const BackendAdapter = (() => {
   }
 
   async function fetchManualData(accountId) {
-    if (!isBackendEnabled()) return { account_id: accountId, rent_roll: null, updated_at: null };
+    const defaults = { account_id: accountId ?? null, rent_roll: null, updated_at: null };
+    if (!isBackendEnabled()) return defaults;
     try {
-      const resp = await fetch(`${state.apiBaseUrl}/db/accounts/${encodeURIComponent(accountId)}/manual-data`, { headers: headers() });
-      if (!resp.ok) return { account_id: accountId, rent_roll: null, updated_at: null };
-      return await resp.json();
+      const url = buildUrl(endpointTemplates.manualRentRoll, { accountId });
+      const resp = await fetch(url, { headers: headers() });
+      if (!resp.ok) return defaults;
+      const data = await resp.json().catch(() => ({}));
+      return applyTranslation('manualRentRoll', data, { accountId }) || defaults;
     } catch {
-      return { account_id: accountId, rent_roll: null, updated_at: null };
+      return defaults;
     }
   }
 
   async function saveManualData(accountId, rentRoll) {
     if (!isBackendEnabled()) throw new Error("Backend not enabled");
-    const resp = await fetch(`${state.apiBaseUrl}/db/accounts/${encodeURIComponent(accountId)}/manual-data`, {
+    const url = buildUrl(endpointTemplates.manualRentRoll, { accountId });
+    const resp = await fetch(url, {
       method: 'PUT',
       headers: { ...headers(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ rent_roll: rentRoll })
     });
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ description: 'Failed to save' }));
-      throw new Error(err.description || 'Failed to save');
+      const err = await resp.json().catch(() => ({}));
+      const message = extractErrorMessage(err) || resp.statusText || 'Failed to save';
+      throw new Error(message);
     }
-    return await resp.json();
+    const data = await resp.json().catch(() => ({}));
+    return applyTranslation('manualRentRoll', data, { accountId }) || { account_id: accountId ?? null, rent_roll: null, updated_at: null };
+  }
+
+  function extractErrorMessage(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    if (typeof payload.description === 'string' && payload.description.trim()) return payload.description.trim();
+    if (typeof payload.message === 'string' && payload.message.trim()) return payload.message.trim();
+    if (Array.isArray(payload.errors)) {
+      for (const err of payload.errors) {
+        if (typeof err === 'string' && err.trim()) return err.trim();
+        if (err && typeof err === 'object') {
+          if (typeof err.message === 'string' && err.message.trim()) return err.message.trim();
+          if (typeof err.description === 'string' && err.description.trim()) return err.description.trim();
+        }
+      }
+    }
+    if (payload.error) {
+      const errObj = payload.error;
+      if (typeof errObj === 'string' && errObj.trim()) return errObj.trim();
+      if (errObj && typeof errObj === 'object') {
+        if (typeof errObj.message === 'string' && errObj.message.trim()) return errObj.message.trim();
+        if (typeof errObj.description === 'string' && errObj.description.trim()) return errObj.description.trim();
+      }
+    }
+    return null;
   }
 
   return { loadConfig, isBackendEnabled, fetchAccounts, fetchCachedBalance, fetchCachedTransactions, refreshLive, fetchManualData, saveManualData };
