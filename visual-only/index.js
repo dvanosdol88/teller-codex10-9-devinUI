@@ -8,6 +8,9 @@ const BackendAdapter = (() => {
     bearerToken: undefined,
   };
 
+  const backendInventory = (typeof window !== 'undefined' && window.BACKEND_INVENTORY) || {};
+  const endpointTemplates = createEndpointTemplates(backendInventory);
+
   function isBackendEnabled() {
     return Boolean(window.FEATURE_USE_BACKEND);
   }
@@ -41,12 +44,12 @@ const BackendAdapter = (() => {
   async function fetchAccounts() {
     if (!isBackendEnabled()) return MOCK_ACCOUNTS;
     try {
-      const resp = await fetch(`${state.apiBaseUrl}/db/accounts`, { headers: headers() });
+      const url = buildUrl(endpointTemplates.accounts);
+      const resp = await fetch(url, { headers: headers() });
       if (!resp.ok) throw new Error("accounts failed");
       const data = await resp.json();
-      return (data.accounts || []).map(a => ({
-        id: a.id, name: a.name, institution: a.institution, last_four: a.last_four, currency: a.currency
-      }));
+      const normalized = applyTranslation("accounts", data);
+      return Array.isArray(normalized) && normalized.length ? normalized : [];
     } catch {
       return MOCK_ACCOUNTS;
     }
@@ -55,10 +58,12 @@ const BackendAdapter = (() => {
   async function fetchCachedBalance(accountId) {
     if (!isBackendEnabled()) return MOCK_BALANCES[accountId];
     try {
-      const resp = await fetch(`${state.apiBaseUrl}/db/accounts/${encodeURIComponent(accountId)}/balances`, { headers: headers() });
+      const url = buildUrl(endpointTemplates.cachedBalance, { accountId });
+      const resp = await fetch(url, { headers: headers() });
       if (!resp.ok) throw new Error("balance failed");
       const data = await resp.json();
-      return { ...data.balance, cached_at: data.cached_at };
+      const normalized = applyTranslation("cachedBalance", data, { accountId });
+      return normalized || MOCK_BALANCES[accountId];
     } catch {
       return MOCK_BALANCES[accountId];
     }
@@ -67,11 +72,12 @@ const BackendAdapter = (() => {
   async function fetchCachedTransactions(accountId, limit = 10) {
     if (!isBackendEnabled()) return (MOCK_TRANSACTIONS[accountId] || []);
     try {
-      const url = `${state.apiBaseUrl}/db/accounts/${encodeURIComponent(accountId)}/transactions?limit=${limit}`;
+      const url = buildUrl(endpointTemplates.cachedTransactions, { accountId, limit }, { limit });
       const resp = await fetch(url, { headers: headers() });
       if (!resp.ok) throw new Error("transactions failed");
       const data = await resp.json();
-      return data.transactions || [];
+      const normalized = applyTranslation("cachedTransactions", data, { accountId, limit });
+      return Array.isArray(normalized) ? normalized : [];
     } catch {
       return (MOCK_TRANSACTIONS[accountId] || []);
     }
@@ -81,16 +87,213 @@ const BackendAdapter = (() => {
     if (!isBackendEnabled()) return { balance: MOCK_BALANCES[accountId], transactions: (MOCK_TRANSACTIONS[accountId] || []) };
     try {
       const [bResp, tResp] = await Promise.all([
-        fetch(`${state.apiBaseUrl}/accounts/${encodeURIComponent(accountId)}/balances`, { headers: headers() }),
-        fetch(`${state.apiBaseUrl}/accounts/${encodeURIComponent(accountId)}/transactions?count=${count}`, { headers: headers() }),
+        fetch(buildUrl(endpointTemplates.liveBalance, { accountId }), { headers: headers() }),
+        fetch(buildUrl(endpointTemplates.liveTransactions, { accountId, count }, { count }), { headers: headers() }),
       ]);
       if (!bResp.ok || !tResp.ok) throw new Error("live refresh failed");
-      const balance = await bResp.json();
-      const txsData = await tResp.json();
-      return { balance, transactions: txsData.transactions || [] };
+      const balanceRaw = await bResp.json();
+      const txsRaw = await tResp.json();
+      const balance = applyTranslation("liveBalance", balanceRaw, { accountId }) || MOCK_BALANCES[accountId];
+      const transactions = applyTranslation("liveTransactions", txsRaw, { accountId, count }) || [];
+      return { balance, transactions: Array.isArray(transactions) ? transactions : [] };
     } catch {
       return { balance: MOCK_BALANCES[accountId], transactions: (MOCK_TRANSACTIONS[accountId] || []) };
     }
+  }
+
+  function createEndpointTemplates(inventory = {}) {
+    const defaults = {
+      accounts: '/db/accounts',
+      cachedBalance: '/db/accounts/{accountId}/balances',
+      cachedTransactions: '/db/accounts/{accountId}/transactions?limit={limit}',
+      liveBalance: '/accounts/{accountId}/balances',
+      liveTransactions: '/accounts/{accountId}/transactions?count={count}',
+    };
+    const aliases = {
+      accounts: ['accounts', 'accountsUrl', 'accountsList'],
+      cachedBalance: ['cachedBalance', 'balance', 'cachedBalanceUrl', 'accountBalance'],
+      cachedTransactions: ['cachedTransactions', 'transactions', 'cachedTransactionsUrl', 'accountTransactions'],
+      liveBalance: ['liveBalance', 'liveBalanceUrl', 'liveAccountBalance'],
+      liveTransactions: ['liveTransactions', 'liveTransactionsUrl', 'liveAccountTransactions'],
+    };
+    const source = (inventory && (inventory.endpoints || inventory.urls)) || inventory || {};
+    return Object.keys(defaults).reduce((acc, key) => {
+      const options = aliases[key] || [];
+      let template;
+      for (const alias of options) {
+        if (typeof source?.[alias] === 'string' && source[alias].trim()) {
+          template = source[alias].trim();
+          break;
+        }
+      }
+      acc[key] = template || defaults[key];
+      return acc;
+    }, {});
+  }
+
+  function buildUrl(template, pathParams = {}, queryParams = {}) {
+    const replaced = (template || '').replace(/\{(\w+)\}/g, (_, token) => {
+      if (Object.prototype.hasOwnProperty.call(pathParams, token)) {
+        const value = pathParams[token];
+        return value == null ? '' : encodeURIComponent(value);
+      }
+      return '';
+    });
+    let url = replaced;
+    const queryPairs = Object.entries(queryParams)
+      .filter(([, value]) => value !== undefined && value !== null && `${value}` !== '')
+      .filter(([key]) => !new RegExp(`[?&]${encodeURIComponent(key)}=`).test(replaced));
+    if (queryPairs.length) {
+      const query = queryPairs
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+        .join('&');
+      url += (url.includes('?') ? '&' : '?') + query;
+    }
+    if (/^https?:\/\//i.test(url)) {
+      return url;
+    }
+    const base = state.apiBaseUrl || '';
+    const trimmedBase = base.replace(/\/+$/, '');
+    const trimmedPath = url.replace(/^\/+/, '');
+    if (!trimmedBase) {
+      return trimmedPath ? `/${trimmedPath}` : '/';
+    }
+    if (!trimmedPath) {
+      return trimmedBase;
+    }
+    return `${trimmedBase}/${trimmedPath}`;
+  }
+
+  function applyTranslation(key, payload, context) {
+    const translator = translationMap[key];
+    if (typeof translator === 'function') {
+      try {
+        const result = translator(payload, context, applyTranslation);
+        if (result !== undefined) return result;
+      } catch {}
+    }
+    const fallbackKey = translationFallbacks[key];
+    if (fallbackKey && fallbackKey !== key) {
+      return applyTranslation(fallbackKey, payload, context);
+    }
+    return undefined;
+  }
+
+  const translationFallbacks = {
+    liveBalance: 'cachedBalance',
+    liveTransactions: 'cachedTransactions',
+  };
+
+  const defaultTranslationMap = {
+    accounts: translateAccounts,
+    cachedBalance: translateCachedBalance,
+    cachedTransactions: translateCachedTransactions,
+    liveBalance: translateLiveBalance,
+    liveTransactions: translateLiveTransactions,
+  };
+
+  const translationMap = createTranslationMap(backendInventory);
+
+  function createTranslationMap(inventory = {}) {
+    const overrides = (inventory && (inventory.translationMap || inventory.translations)) || {};
+    const normalizedOverrides = Object.entries(overrides).reduce((acc, [key, translator]) => {
+      if (typeof translator === 'function') acc[key] = translator;
+      return acc;
+    }, {});
+    return { ...defaultTranslationMap, ...normalizedOverrides };
+  }
+
+  function translateAccounts(payload) {
+    const list = Array.isArray(payload?.accounts) ? payload.accounts : Array.isArray(payload) ? payload : [];
+    return list
+      .map(normalizeAccount)
+      .filter(Boolean);
+  }
+
+  function translateCachedBalance(payload) {
+    const balancePayload = payload?.balance && typeof payload.balance === 'object' ? payload.balance : payload || {};
+    const available = coerceNumber(balancePayload.available ?? balancePayload.available_balance ?? balancePayload.current);
+    const ledger = coerceNumber(balancePayload.ledger ?? balancePayload.ledger_balance ?? balancePayload.current);
+    const currency = coerceCurrency(balancePayload.currency ?? payload?.currency);
+    const cachedAt = coerceTimestamp(payload?.cached_at ?? balancePayload.cached_at ?? payload?.updated_at);
+    return {
+      available: available ?? null,
+      ledger: ledger ?? available ?? null,
+      currency,
+      cached_at: cachedAt,
+    };
+  }
+
+  function translateCachedTransactions(payload) {
+    const list = Array.isArray(payload?.transactions) ? payload.transactions : Array.isArray(payload) ? payload : [];
+    return list
+      .map(normalizeTransaction)
+      .filter(Boolean);
+  }
+
+  function translateLiveBalance(payload) {
+    return translateCachedBalance(payload);
+  }
+
+  function translateLiveTransactions(payload) {
+    return translateCachedTransactions(payload);
+  }
+
+  function normalizeAccount(account) {
+    if (!account || typeof account !== 'object') return null;
+    const id = coerceId(account.id ?? account.account_id ?? account.accountId ?? account.uuid ?? account.external_id);
+    if (!id) return null;
+    const name = coerceString(account.name ?? account.display_name ?? account.account_name) || 'Account';
+    const institution = coerceString(account.institution ?? account.bank_name ?? account.institution_name ?? account.provider);
+    const lastFour = coerceLastFour(account.last_four ?? account.last4 ?? account.lastFour ?? account.mask ?? account.account_number);
+    const currency = coerceCurrency(account.currency ?? account.currency_code ?? account.account_currency);
+    return { id, name, institution, last_four: lastFour, currency };
+  }
+
+  function normalizeTransaction(txn) {
+    if (!txn || typeof txn !== 'object') return null;
+    const description = coerceString(txn.description ?? txn.name ?? txn.merchant ?? txn.memo ?? txn.counterparty) || 'Transaction';
+    const amount = coerceNumber(txn.amount ?? txn.value ?? txn.transaction_amount ?? txn.total);
+    const date = coerceTimestamp(txn.date ?? txn.posted_at ?? txn.timestamp ?? txn.created_at ?? txn.updated_at);
+    return {
+      description,
+      amount: amount ?? 0,
+      date,
+    };
+  }
+
+  function coerceString(value) {
+    if (value == null) return '';
+    return String(value).trim();
+  }
+
+  function coerceId(value) {
+    const str = coerceString(value);
+    return str || null;
+  }
+
+  function coerceLastFour(value) {
+    const digits = coerceString(value).replace(/\D+/g, '');
+    if (digits.length >= 4) return digits.slice(-4);
+    return digits || null;
+  }
+
+  function coerceCurrency(value) {
+    const str = coerceString(value).toUpperCase();
+    return str || 'USD';
+  }
+
+  function coerceNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  function coerceTimestamp(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toISOString();
   }
 
   async function fetchManualData(accountId) {
