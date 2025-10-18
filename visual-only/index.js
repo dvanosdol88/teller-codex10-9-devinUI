@@ -5,7 +5,15 @@ window.TEST_BEARER_TOKEN = undefined;
 const BackendAdapter = (() => {
   const state = {
     apiBaseUrl: "/api",
-    bearerToken: undefined,
+    auth: {
+      header: "Authorization",
+      scheme: "Bearer",
+      prefix: undefined,
+      token: undefined,
+      value: undefined,
+    },
+    staticHeaders: {},
+    extras: {},
   };
 
   const backendInventory = (typeof window !== 'undefined' && window.BACKEND_INVENTORY) || {};
@@ -23,11 +31,21 @@ const BackendAdapter = (() => {
       const resp = await fetch('/api/config', { headers: { Accept: 'application/json' } });
       if (resp && resp.ok) {
         const cfg = await resp.json().catch(() => ({}));
-        if (cfg && typeof cfg.apiBaseUrl === 'string' && cfg.apiBaseUrl.trim()) {
-          state.apiBaseUrl = cfg.apiBaseUrl;
+        const mapped = mapBackendConfig(cfg);
+        if (mapped.apiBaseUrl) {
+          state.apiBaseUrl = mapped.apiBaseUrl;
         }
-        if (cfg && typeof cfg.FEATURE_USE_BACKEND === 'boolean') {
-          window.FEATURE_USE_BACKEND = cfg.FEATURE_USE_BACKEND;
+        if (typeof mapped.featureUseBackend === 'boolean') {
+          window.FEATURE_USE_BACKEND = mapped.featureUseBackend;
+        }
+        if (mapped.auth) {
+          state.auth = { ...state.auth, ...mapped.auth };
+        }
+        if (mapped.staticHeaders) {
+          state.staticHeaders = mapped.staticHeaders;
+        }
+        if (mapped.extras) {
+          state.extras = mapped.extras;
         }
       }
     } catch {}
@@ -36,8 +54,25 @@ const BackendAdapter = (() => {
 
   function headers() {
     const h = { "Accept": "application/json" };
-    const token = window.TEST_BEARER_TOKEN || state.bearerToken;
-    if (token) h["Authorization"] = `Bearer ${token}`;
+    if (state.staticHeaders && typeof state.staticHeaders === 'object') {
+      for (const [key, value] of Object.entries(state.staticHeaders)) {
+        if (value != null) {
+          h[key] = value;
+        }
+      }
+    }
+    const tokenOverride = window.TEST_BEARER_TOKEN;
+    const authConfig = state.auth || {};
+    const headerName = authConfig.header || 'Authorization';
+    let headerValue = authConfig.value;
+    const token = tokenOverride || authConfig.token;
+    if (!headerValue && token) {
+      const prefix = authConfig.prefix != null ? authConfig.prefix : (authConfig.scheme ? `${authConfig.scheme} ` : '');
+      headerValue = `${prefix || ''}${token}`.trim();
+    }
+    if (headerValue) {
+      h[headerName] = headerValue;
+    }
     return h;
   }
 
@@ -196,6 +231,166 @@ const BackendAdapter = (() => {
   };
 
   const translationMap = createTranslationMap(backendInventory);
+
+  function mapBackendConfig(rawConfig = {}) {
+    if (!rawConfig || typeof rawConfig !== 'object') {
+      return {};
+    }
+
+    const normalized = {};
+
+    const apiBaseUrl = selectFirstString([
+      rawConfig.apiBaseUrl,
+      rawConfig.api_base_url,
+      rawConfig.api_baseUrl,
+      rawConfig.api?.baseUrl,
+      rawConfig.api?.base_url,
+      rawConfig.api?.url,
+      rawConfig.baseUrl,
+      rawConfig.base_url,
+    ]);
+    if (apiBaseUrl) {
+      normalized.apiBaseUrl = apiBaseUrl;
+    }
+
+    const featureUseBackend = selectFirstBoolean([
+      rawConfig.FEATURE_USE_BACKEND,
+      rawConfig.featureUseBackend,
+      rawConfig.features?.useBackend,
+      rawConfig.featureFlags?.useBackend,
+      rawConfig.flags?.useBackend,
+    ]);
+    if (typeof featureUseBackend === 'boolean') {
+      normalized.featureUseBackend = featureUseBackend;
+    }
+
+    const authConfig = normalizeAuthConfig(rawConfig);
+    if (authConfig && Object.keys(authConfig).length) {
+      normalized.auth = authConfig;
+    }
+
+    const staticHeaders = normalizeStaticHeaders(rawConfig);
+    if (staticHeaders && Object.keys(staticHeaders).length) {
+      normalized.staticHeaders = staticHeaders;
+    }
+
+    const extras = extractExtras(rawConfig, normalized);
+    if (extras && Object.keys(extras).length) {
+      normalized.extras = extras;
+    }
+
+    return normalized;
+  }
+
+  function selectFirstString(candidates = []) {
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+    return undefined;
+  }
+
+  function selectFirstBoolean(candidates = []) {
+    for (const candidate of candidates) {
+      if (typeof candidate === 'boolean') {
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+
+  function normalizeAuthConfig(rawConfig = {}) {
+    const authBlock = rawConfig.auth || rawConfig.authentication || {};
+    const tokenCandidates = [
+      authBlock.token,
+      authBlock.accessToken,
+      authBlock.bearerToken,
+      rawConfig.bearerToken,
+      rawConfig.token,
+      rawConfig.apiKey,
+      rawConfig.api_key,
+      rawConfig.key,
+    ];
+    const headerCandidates = [
+      authBlock.header,
+      authBlock.headerName,
+      authBlock.header_name,
+      authBlock.name,
+      authBlock.key,
+    ];
+    const schemeCandidates = [
+      authBlock.scheme,
+      authBlock.type,
+      authBlock.strategy,
+    ];
+    const prefixCandidates = [
+      authBlock.prefix,
+      authBlock.tokenPrefix,
+      authBlock.token_prefix,
+    ];
+    const valueCandidates = [
+      authBlock.value,
+      authBlock.headerValue,
+      authBlock.header_value,
+    ];
+
+    const header = selectFirstString([...headerCandidates, schemeCandidates[0] ? 'Authorization' : undefined]) || 'Authorization';
+    const token = selectFirstString(tokenCandidates);
+    const scheme = selectFirstString(schemeCandidates);
+    const prefix = selectFirstString(prefixCandidates);
+    const value = selectFirstString(valueCandidates);
+
+    const normalized = {};
+    if (header) normalized.header = header;
+    if (scheme) normalized.scheme = scheme;
+    if (prefix !== undefined) normalized.prefix = prefix;
+    if (token) normalized.token = token;
+    if (value) normalized.value = value;
+
+    return normalized;
+  }
+
+  function normalizeStaticHeaders(rawConfig = {}) {
+    const headersBlock = rawConfig.headers || rawConfig.defaultHeaders || rawConfig.staticHeaders;
+    if (!headersBlock || typeof headersBlock !== 'object') {
+      return undefined;
+    }
+    return Object.entries(headersBlock).reduce((acc, [key, value]) => {
+      if (typeof key === 'string' && value != null) {
+        acc[key] = value;
+      }
+      return acc;
+    }, {});
+  }
+
+  function extractExtras(rawConfig = {}, normalized = {}) {
+    const knownKeys = new Set([
+      'apiBaseUrl',
+      'api_base_url',
+      'api_baseUrl',
+      'baseUrl',
+      'base_url',
+      'FEATURE_USE_BACKEND',
+      'featureUseBackend',
+      'features',
+      'featureFlags',
+      'flags',
+      'auth',
+      'authentication',
+      'headers',
+      'defaultHeaders',
+      'staticHeaders',
+    ]);
+
+    const extras = {};
+    for (const [key, value] of Object.entries(rawConfig)) {
+      if (!knownKeys.has(key) && !(key in (normalized || {}))) {
+        extras[key] = value;
+      }
+    }
+    return extras;
+  }
 
   function createTranslationMap(inventory = {}) {
     const overrides = (inventory && (inventory.translationMap || inventory.translations)) || {};
