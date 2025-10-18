@@ -127,6 +127,28 @@ Key DevTools panels:
 
 **Expected Result**: Backend requests are attempted but fail gracefully. UI falls back to mock data without errors or broken states.
 
+## Scenario 2b: Manual Backend Disable Toggle
+
+**Purpose**: Verify that flipping `FEATURE_USE_BACKEND` off at runtime returns the UI to mock content.
+
+**Configuration**:
+- Begin from Scenario 2 (backend enabled) or Scenario 3 (backend serving data)
+- DevTools Console access
+
+**Steps**:
+
+1. Open DevTools Console
+2. Run: `window.FEATURE_USE_BACKEND = false`
+3. Reload the page
+
+**Verification Checklist**:
+
+- [ ] **Network Tab**: No new requests to `/api/config` or `/api/db/*`
+- [ ] **Console**: No errors while reloading with the flag disabled
+- [ ] **UI Rendering**: Cards revert to mock balances ($1,250.25 / $8,200.00) and mock transactions (Coffee Shop, Payroll)
+
+**Expected Result**: After reloading with the flag set to `false`, the UI renders the mock dataset and does not attempt backend calls.
+
 ## Scenario 3: Backend Enabled and Reachable
 
 **Purpose**: Verify integration with live backend returns cached data correctly.
